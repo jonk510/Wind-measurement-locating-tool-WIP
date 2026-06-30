@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# Large sample data (regenerated / user-supplied at runtime)
+*XYZcontours.csv
+
+# Local backup snapshots — not for deployment
+back up no online contours.py
+py back up basic working 10.15.2026.py
+wind_meaurement_locator_.py
+
+# Local-only / not used by the deployed app
+Launch Wind Optimiser.command
+# standalone engine, not imported by app.py
+wind_meaurement_locator.py
+# sample input data
+*_WTG_locations.csv
+*_measurement_locations.csv
+wind_measurement_locations.csv

@@ -20,16 +20,19 @@ from scipy.interpolate import griddata
 from scipy.spatial import cKDTree
 from scipy.optimize import minimize
 from sklearn.cluster import KMeans
+import os
+import sys
 import streamlit as st
 
 warnings.filterwarnings("ignore")
 
+# Make the shared library importable when running locally (not pip-installed).
 try:
-    import requests
-    from pyproj import Transformer as _ProjTransformer
-    _HAS_DEM = True
-except ImportError:
-    _HAS_DEM = False
+    import shared as _shared_pkg  # noqa: F401
+except ModuleNotFoundError:
+    import os as _os, sys as _sys
+    _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+from shared.srtm import fetch_srtm_elevation
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -355,8 +358,19 @@ class WindMeasurementAnalyser:
         return h_unc, v_unc, i_unc
 
     def build_heatmap_grids(self, resolution=150):
-        xmin, xmax = self.xyz["X"].min(), self.xyz["X"].max()
-        ymin, ymax = self.xyz["Y"].min(), self.xyz["Y"].max()
+        # Build the grid centred on the wind farm so WTGs and masts are always
+        # visible, even if the DEM was downloaded for a slightly different zone.
+        all_xy = np.vstack([
+            self.wtg[["X", "Y"]].values.astype(float),
+            self.meas_locs,
+        ])
+        span   = max(all_xy[:, 0].max() - all_xy[:, 0].min(),
+                     all_xy[:, 1].max() - all_xy[:, 1].min())
+        margin = max(span * 0.20, 5000.0)   # 20 % of span, minimum 5 km
+        xmin = all_xy[:, 0].min() - margin
+        xmax = all_xy[:, 0].max() + margin
+        ymin = all_xy[:, 1].min() - margin
+        ymax = all_xy[:, 1].max() + margin
         xi = np.linspace(xmin, xmax, resolution)
         yi = np.linspace(ymin, ymax, resolution)
         xx, yy = np.meshgrid(xi, yi)
@@ -407,10 +421,15 @@ def _draw_terrain(ax, xx, yy, elev_grid, n_levels=18):
         return
     lo = np.nanpercentile(elev_grid, 2)
     hi = np.nanpercentile(elev_grid, 98)
+    if hi - lo < 1.0:   # flat or constant elevation — contourf would crash
+        return
     levels = np.linspace(lo, hi, n_levels)
-    ax.contourf(xx, yy, elev_grid, levels=levels, cmap="terrain", alpha=0.30)
-    ax.contour(xx, yy, elev_grid, levels=levels,
-               colors="grey", linewidths=0.35, alpha=0.55)
+    try:
+        ax.contourf(xx, yy, elev_grid, levels=levels, cmap="terrain", alpha=0.30)
+        ax.contour(xx, yy, elev_grid, levels=levels,
+                   colors="grey", linewidths=0.35, alpha=0.55)
+    except ValueError:
+        pass  # degenerate levels — skip terrain overlay rather than crash
 
 
 def _format_axis(ax):
@@ -466,14 +485,16 @@ def build_figure(analyser, h_unc, v_unc, i_unc,
     combined_grid = np.sqrt(h_grid ** 2 + v_grid ** 2 + inst_grid ** 2)
     combined_unc  = np.sqrt(h_unc  ** 2 + v_unc  ** 2 + i_unc   ** 2)
 
-    fig = plt.figure(figsize=(18, 14))
+    fig = plt.figure(figsize=(18, 17))
     fig.suptitle(
         f"Wind Measurement Location Optimisation  —  {title_n}  |  "
         f"Terrain: {analyser.terrain}",
         fontsize=14, fontweight="bold", y=0.98,
     )
-    gs = GridSpec(2, 2, figure=fig, hspace=0.38, wspace=0.28,
-                  left=0.07, right=0.97, top=0.93, bottom=0.05)
+    # Top row: three equal panels. Bottom row: combined uncertainty full-width.
+    gs = GridSpec(2, 3, figure=fig, hspace=0.38, wspace=0.30,
+                  left=0.06, right=0.98, top=0.93, bottom=0.05,
+                  height_ratios=[1, 1.4])
 
     # Panel 1 : Cluster map
     ax0 = fig.add_subplot(gs[0, 0])
@@ -530,7 +551,7 @@ def build_figure(analyser, h_unc, v_unc, i_unc,
     _format_axis(ax1)
 
     # Panel 3 : Vertical uncertainty
-    ax2 = fig.add_subplot(gs[1, 0])
+    ax2 = fig.add_subplot(gs[0, 2])
     _draw_terrain(ax2, xx, yy, elev_grid)
     ax2.set_title("Vertical Extrapolation Uncertainty",
                   fontsize=10, fontweight="bold")
@@ -548,23 +569,24 @@ def build_figure(analyser, h_unc, v_unc, i_unc,
     _scatter_masts(ax2, meas_locs, n_existing=n_existing, mast_types=mast_types)
     _format_axis(ax2)
 
-    # Panel 4 : Combined RSS uncertainty
-    ax3 = fig.add_subplot(gs[1, 1])
+    # Panel 4 : Combined RSS uncertainty — full-width bottom row
+    ax3 = fig.add_subplot(gs[1, :])
     _draw_terrain(ax3, xx, yy, elev_grid)
     ax3.set_title("Combined Uncertainty  √(H² + V² + I²)",
-                  fontsize=10, fontweight="bold")
+                  fontsize=13, fontweight="bold")
     vmax_c = np.nanpercentile(combined_grid, 98)
     im3 = ax3.pcolormesh(xx, yy, combined_grid, cmap="RdPu", alpha=0.72,
                           shading="auto", vmin=0, vmax=max(vmax_c, 0.01))
-    fig.colorbar(im3, ax=ax3, shrink=0.82, pad=0.02).set_label(
-        "Total Uncertainty (%)", fontsize=8)
+    fig.colorbar(im3, ax=ax3, shrink=0.60, pad=0.01).set_label(
+        "Total Uncertainty (%)", fontsize=10)
     ax3.scatter(wtg_xy[:, 0], wtg_xy[:, 1], c=combined_unc, cmap="RdPu",
-                s=70, marker="^", edgecolors="black", linewidths=0.6,
+                s=120, marker="^", edgecolors="black", linewidths=0.7,
                 zorder=5, vmin=0, vmax=max(combined_unc.max(), 0.01))
     for xy, u in zip(wtg_xy, combined_unc):
-        ax3.annotate(f"{u:.1f}%", xy=xy, xytext=(4, 4),
-                     textcoords="offset points", fontsize=6, fontweight="bold")
-    _scatter_masts(ax3, meas_locs, n_existing=n_existing, mast_types=mast_types)
+        ax3.annotate(f"{u:.1f}%", xy=xy, xytext=(5, 5),
+                     textcoords="offset points", fontsize=9, fontweight="bold")
+    _scatter_masts(ax3, meas_locs, analyser.meas_elevs,
+                   n_existing=n_existing, mast_types=mast_types)
     _format_axis(ax3)
 
     # ── Summary note ─────────────────────────────────────────────────────────
@@ -636,65 +658,7 @@ def _fig_png_bytes(fig):
     return buf.read()
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# SRTM DEM auto-download
-# ──────────────────────────────────────────────────────────────────────────────
-
-@st.cache_data(show_spinner=False)
-def fetch_srtm_elevation(wtg_xy: np.ndarray, epsg_code: int,
-                         buffer_m: float = 5000.0,
-                         grid_n: int = 35) -> pd.DataFrame:
-    """Download SRTM 30 m elevation over the WTG bounding box via OpenTopoData.
-
-    Cached by Streamlit so re-running with the same inputs skips the API calls.
-    """
-    if not _HAS_DEM:
-        raise ImportError(
-            "Install 'requests' and 'pyproj':  pip install requests pyproj")
-
-    xmin = wtg_xy[:, 0].min() - buffer_m
-    xmax = wtg_xy[:, 0].max() + buffer_m
-    ymin = wtg_xy[:, 1].min() - buffer_m
-    ymax = wtg_xy[:, 1].max() + buffer_m
-
-    xi = np.linspace(xmin, xmax, grid_n)
-    yi = np.linspace(ymin, ymax, grid_n)
-    xx, yy = np.meshgrid(xi, yi)
-    grid_xy = np.column_stack([xx.ravel(), yy.ravel()])
-
-    transformer = _ProjTransformer.from_crs(
-        f"EPSG:{epsg_code}", "EPSG:4326", always_xy=True)
-    lons, lats = transformer.transform(grid_xy[:, 0], grid_xy[:, 1])
-
-    if not (np.all(np.isfinite(lons)) and np.all(np.isfinite(lats))):
-        raise ValueError(
-            f"Coordinate transformation failed (EPSG:{epsg_code} → WGS84 produced "
-            f"non-finite values). Check that the EPSG code matches the coordinate "
-            f"system of your WTG file.")
-
-    elevations = []
-    batch_size = 100
-    n_pts = len(lats)
-    for start in range(0, n_pts, batch_size):
-        batch_lats = lats[start:start + batch_size]
-        batch_lons = lons[start:start + batch_size]
-        locations = "|".join(
-            f"{lat:.6f},{lon:.6f}" for lat, lon in zip(batch_lats, batch_lons))
-        resp = requests.get(
-            f"https://api.opentopodata.org/v1/srtm30m?locations={locations}",
-            timeout=30)
-        resp.raise_for_status()
-        for r in resp.json()["results"]:
-            elev = r.get("elevation")
-            elevations.append(float(elev) if elev is not None else 0.0)
-        if start + batch_size < n_pts:
-            time.sleep(1.1)
-
-    return pd.DataFrame({
-        "X": grid_xy[:, 0],
-        "Y": grid_xy[:, 1],
-        "Z": np.array(elevations),
-    })
+# fetch_srtm_elevation imported from shared.srtm
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -704,8 +668,10 @@ def fetch_srtm_elevation(wtg_xy: np.ndarray, epsg_code: int,
 def main():
     st.set_page_config(page_title="JK's Wind Measurement Location Optimiser",
                        layout="wide")
-    st.title("JK's Wind Measurement Location Optimiser")
-    st.caption(
+    from shared.style import apply_theme, page_header
+    apply_theme()
+    page_header(
+        "Wind Measurement Location Optimiser",
         "Finds optimal anemometer mast positions that minimise horizontal, "
         "vertical and instrument extrapolation uncertainty across a wind farm layout."
     )

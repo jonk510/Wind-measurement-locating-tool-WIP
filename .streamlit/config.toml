@@ -1,0 +1,11 @@
+# Standard dark terminal-green theme for all JK wind/solar tools.
+# This is the FOUNDATION theme (main background, base text colour, font).
+# It pairs with shared.style.apply_theme(), which styles individual components.
+# Keep this identical across all tools so they look consistent.
+[theme]
+base                     = "dark"
+primaryColor             = "#39D353"
+backgroundColor          = "#0D0D0D"
+secondaryBackgroundColor = "#0D1A0D"
+textColor                = "#CCFFCC"
+font                     = "monospace"
