@@ -6,4 +6,4 @@ scikit-learn
 matplotlib
 pyproj
 requests
-git+https://github.com/jonk510/wind-tools-shared.git@426c3a0
+git+https://github.com/jonk510/wind-tools-shared.git@ac91265
